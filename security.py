@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ from pwdlib import PasswordHash
 from models import User
 from database import SessionLocal
 
-load_dotenv(".env.dev")
+load_dotenv(".env")
 
 SECRET_KEY =os.getenv("SECRET_KEY")
 if not SECRET_KEY:
@@ -50,9 +50,11 @@ def get_user_by_id(db: Session, user_id: str):
     return db.query(User).filter(User.id == user_id).first()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+http_bearer = HTTPBearer(auto_error=False)
 
 def get_current_user_from_jwt(
-    token: str = Depends(oauth2_scheme),
+    token: Optional[str] = Depends(oauth2_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
     db: Session = Depends(get_db)
 ) -> Optional[User]:
     credentials_exception = HTTPException(
@@ -60,8 +62,11 @@ def get_current_user_from_jwt(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    raw_token = token if token else (credentials.credentials if credentials else None)
+    if not raw_token:
+        raise credentials_exception
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(raw_token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
         if user_id is None:
             raise credentials_exception

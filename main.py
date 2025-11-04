@@ -15,16 +15,43 @@ from security import (
     get_current_user_from_jwt,
     ALGORITHM, SECRET_KEY
 )
-from auth import create_user, create_db_session, delete_session, get_active_session, soft_delete_user
+from auth import create_user, create_db_session, delete_session, get_active_session, soft_delete_user, delete_all_sessions_for_user
 from jose import JWTError, jwt
 
 from models import Base
+from rbac import seed_rbac_minimal, seed_users_minimal
+from routes_admin import router as admin_router
+from routes_resources import router as resources_router
+from db_compat import ensure_user_role_column
 Base.metadata.create_all(bind=engine)
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = SessionLocal()
+    try:
+        ensure_user_role_column(engine)
+        seed_rbac_minimal(db)
+        seed_users_minimal(db)
+    finally:
+        db.close()
+    yield
 
 app = FastAPI(
     title="Auth API with JWT + DB Sessions",
-    description="Hybrid auth: JWT for APIs + session cookies for web",
-    version="1.0.0"
+    description=(
+        "Hybrid auth: JWT + DB sessions with RBAC\n\n"
+        "Данные для проверки в Swagger (/docs):\n\n"
+        "- admin: email admin@example.com / пароль AdminPass123\n"
+        "- user: email user@example.com / пароль UserPass123\n\n"
+        "После логина вставьте access_token в Authorize (HTTPBearer, без префикса).\n\n"
+        "Проверка:\n"
+        "- GET /resources/articles — доступно user и admin\n"
+        "- POST /resources/articles — доступно только admin\n"
+    ),
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +65,10 @@ def get_db():
         db.close()
 
 
-@app.post("/register", description="Регистрация нового пользователя",summary="Регистрация", tags=["аунтификация"], response_model=UserPublic, status_code=status.HTTP_201_CREATED)
+app.include_router(admin_router)
+app.include_router(resources_router)
+
+@app.post("/register", description="Регистрация нового пользователя",summary="Регистрация", tags=["аутентификация"], response_model=UserPublic, status_code=status.HTTP_201_CREATED)
 def register(user: UserCreate, db: Session = Depends(get_db)):
     existing_user = db.query(User).filter(User.email == user.email, User.is_active == True).first()
     if existing_user:
@@ -50,7 +80,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     logger.info(f"New user registered: {new_user.email}")
     return new_user
 
-@app.post("/login", summary="Аутентификация", tags=["аунтификация"], response_model=Token)
+@app.post("/login", summary="Аутентификация", tags=["аутентификация"], response_model=Token)
 def login(
     response: Response,
     email: EmailStr = Form(...),
@@ -79,7 +109,7 @@ def login(
     logger.info(f"User logged in: {user.email}")
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.post("/logout", summary="Выход", tags=["аунтификация"], description="Выход из аккаунта. Удаляет сессию.")
+@app.post("/logout", summary="Выход", tags=["аутентификация"], description="Выход из аккаунта. Удаляет сессию.")
 def logout(
     response: Response,
     session_id: Optional[str] = Cookie(None),
@@ -91,7 +121,7 @@ def logout(
     response.delete_cookie("session_id")
     return {"detail": "Successfully logged out"}
 
-@app.get("/profile" , tags=["редактирование пользователя"], description="Изменение пользователя", summary="Профиль", response_model=UserPublic)
+@app.get("/profile" , tags=["пользователь"], description="Изменение пользователя", summary="Профиль", response_model=UserPublic)
 def profile(
     request: Request,
     response: Response,
@@ -119,7 +149,7 @@ class UserUpdate(BaseModel):
     last_name: Optional[str] = Field(None, min_length=2, max_length=50)
     patronymic: Optional[str] = None
 
-@app.patch("/profile", response_model=UserPublic, tags=["редактирование пользователя"])
+@app.patch("/profile", response_model=UserPublic, tags=["пользователь"])
 def update_profile(
     update_data: UserUpdate,
     db: Session = Depends(get_db),
@@ -142,7 +172,7 @@ def update_profile(
 
 @app.delete("/account",
              summary="Мягкое удаление аккаунта", 
-             tags=["редактирование пользователя"],
+             tags=["пользователь"],
              description="Пользователь инициирует удаление аккаунта. Происходит logout и установка is_active=False.")
 def delete_account(
     request: Request,
@@ -165,9 +195,8 @@ def delete_account(
     if not current_user:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    session_id = request.cookies.get("session_id")
-    if session_id:
-        delete_session(db, session_id)
+    # Отозвать все сессии пользователя
+    delete_all_sessions_for_user(db, current_user.id)
 
     soft_delete_user(db, current_user.id)
 
@@ -178,4 +207,4 @@ def delete_account(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app,reload=True)
+    uvicorn.run("main:app", reload=True)

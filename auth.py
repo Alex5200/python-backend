@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from schemas import UserCreate
-from models import User, UserSession
+from models import User, UserSession, Role
 from datetime import datetime, timedelta, timezone
 from security import hash_password
 import uuid
@@ -19,6 +19,13 @@ def create_user(db: Session, user: UserCreate) -> User:
 
     hashed_password = hash_password(user.password)
 
+    default_role = db.query(Role).filter(Role.name == "admin").first() # назначаем admin по умолчанию
+    if not default_role:
+        default_role = Role(name="admin")
+        db.add(default_role)
+        db.commit()
+        db.refresh(default_role)
+
     db_user = User(
         id=uuid.uuid4(),
         email=user.email,
@@ -26,7 +33,8 @@ def create_user(db: Session, user: UserCreate) -> User:
         first_name=user.first_name,
         last_name=user.last_name,
         patronymic=user.patronymic,
-        is_active=True
+        is_active=True,
+        role_id=(default_role.id if default_role else None)
     )
     
     db.add(db_user)
@@ -87,3 +95,8 @@ def soft_delete_user(db: Session, user_id: uuid.UUID):
         db.commit()
         db.refresh(user)
     return user
+
+
+def delete_all_sessions_for_user(db: Session, user_id: uuid.UUID):
+    db.query(UserSession).filter(UserSession.user_id == user_id).delete()
+    db.commit()
